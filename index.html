@@ -772,9 +772,13 @@ function go(r,opt){
   opt=opt||{};
   closeMenus();
   if(!opt.replace){try{history.pushState({r},'')}catch(e){}}else{try{history.replaceState({r},'')}catch(e){}}
-  S.route=r;render(true);
+  S.route=r;rememberRoute(r);render(true);
 }
-window.addEventListener('popstate',e=>{if(e.state&&e.state.r){S.route=e.state.r;render(true)}});
+/* remember where the viewer was, so reopening the site lands on the same document */
+const REMEMBER=['page','edit','history','backlinks','search','recent','all','cats','wanted','files','drafts','restore','settings'];
+function rememberRoute(r){if(!r||!REMEMBER.includes(r.v))return;const o={v:r.v};['t','q','ns','sec','anchor'].forEach(k=>{if(r[k]!==undefined&&r[k]!==null&&r[k]!=='')o[k]=r[k]});if(r.v==='page'&&r.from)o.t=r.t;lsSet('mpw-lastroute',JSON.stringify(o))}
+function savedRoute(){try{const o=JSON.parse(lsGet('mpw-lastroute')||'null');if(o&&REMEMBER.includes(o.v))return o}catch(e){}return null}
+window.addEventListener('popstate',e=>{if(e.state&&e.state.r){S.route=e.state.r;rememberRoute(S.route);render(true)}});
 function render(scrollTop){
   if(S.leaveEditor){const f=S.leaveEditor;S.leaveEditor=null;try{f()}catch(e){console.error(e)}}
   if(S.authBlocked){main.innerHTML=`<div class="empty-state"><h2>${S.user?'이 계정으로는 볼 수 없습니다':'로그인이 필요합니다'}</h2><p>${S.user?`${escT(S.user.email||'')} 계정에는 이 위키를 볼 권한이 없습니다. 위키 주인 계정으로 다시 로그인하세요.`:'이 위키는 주인만 볼 수 있습니다. 구글 계정으로 로그인하세요.'}</p><div class="row"><button class="btn pri" data-act="auth">${S.user?'로그아웃':'구글로 로그인'}</button></div></div>`;return}
@@ -826,6 +830,7 @@ function viewPage(r){
     const rt=redirectTarget(p.content);
     if(rt&&!r.noredirect&&rt!==t&&!r.from){go({v:'page',t:rt,from:t,anchor:r.anchor},{replace:true});return}
     html+=head(t,'page',p)+draftNote;
+    if(S.restoredRoute){S.restoredRoute=false;html+=`<div class="notice">마지막으로 보던 문서를 열었습니다. <a href="#" data-act="front">대문으로 가기</a></div>`}
     if(r.from)html+=`<div class="notice"><a href="#" data-go="${escA(r.from)}" data-noredirect="1">${escT(r.from)}</a>에서 넘어왔습니다.</div>`;
     const d=renderDoc(t,p.content);
     const cats=d.ctx.cats;
@@ -1680,7 +1685,7 @@ $('#sform').addEventListener('submit',e=>{
 });
 
 /* ---------- init ---------- */
-function readyCheck(){if(!S.ready&&S._p&&S._m){S.ready=true;afterReady();renderSide();$('#logo-t').textContent=SITE();if(!S.route){S.route={v:'page',t:FRONT()};try{history.replaceState({r:S.route},'')}catch(e){}}render(true)}}
+function readyCheck(){if(!S.ready&&S._p&&S._m){S.ready=true;afterReady();renderSide();$('#logo-t').textContent=SITE();if(!S.route){S.route=savedRoute()||{v:'page',t:FRONT()};if(S.route.v==='page'&&S.route.t&&S.route.t!==FRONT())S.restoredRoute=true;try{history.replaceState({r:S.route},'')}catch(e){}}render(true)}}
 async function init(){
   loadLocal();
   const cfg=window.MPWIKI_FIREBASE||{};

@@ -7,5 +7,5 @@ window.MPWIKI_FIREBASE = {
   messagingSenderId: "307542504264",
   appId: "1:307542504264:web:62c055520b2fa59e6eb97d"
 };
-/* 2) 편집할 수 있는 구글 계정 이메일 (firestore.rules에도 같은 이메일을 적으세요) */
+/* 2) 편집할 수 있는 구글 계정의 이메일 (firestore.rules에도 같은 이메일을 적으세요) */
 window.MPWIKI_OWNER = "mp20090114@gmail.com";

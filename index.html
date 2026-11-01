@@ -17,8 +17,7 @@ window.MPWIKI_FIREBASE = {
 };
 /* 2) 편집할 수 있는 구글 계정 이메일 (firestore.rules에도 같은 이메일을 적으세요) */
 window.MPWIKI_OWNER = "mp20090114@gmail.com";
-/* ========================================================== */
-</script>
+<script src="firebase-config.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
@@ -100,6 +99,8 @@ button,input,textarea,select{font:inherit;color:inherit}
 .rc li a{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rc time{color:var(--muted);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .rc .empty{color:var(--muted);display:block;padding:10px 14px}
+.side-drafts{color:var(--fg);background:var(--raised)}
+.side-drafts b{font-weight:700}
 .side-note{padding:10px 14px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
 
 /* article head */
@@ -295,6 +296,8 @@ textarea.ed:focus{outline:none}
         <button data-act="files">파일 목록 · 올리기</button>
         <button data-act="newpage">새 문서 만들기</button>
         <button data-act="tpls">템플릿 관리</button>
+        <button data-act="restore">되돌리기 · 복원 지점</button>
+        <button data-act="drafts">저장 안 된 편집</button>
         <button data-act="settings">설정 · 백업</button>
       </div>
     </div>
@@ -313,6 +316,7 @@ textarea.ed:focus{outline:none}
   <aside class="card side" id="side">
     <div class="side-h"><span>최근 변경</span><button data-act="recent">더 보기</button></div>
     <ul class="rc" id="rc"><li><span class="empty">불러오는 중…</span></li></ul>
+    <div class="side-note side-drafts" id="side-drafts" hidden></div>
     <div class="side-note" id="side-note" hidden></div>
   </aside>
 </div>
@@ -338,7 +342,7 @@ const lsSet=(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}};
 const lsDel=k=>{try{localStorage.removeItem(k)}catch(e){}};
 
 /* ---------- state ---------- */
-const S={pages:new Map(),byTitle:new Map(),files:new Map(),recent:[],meta:{},ready:false,mode:'local',canWrite:true,route:null,metaReady:false};
+const S={drafts:new Map(),lastSnap:null,pages:new Map(),byTitle:new Map(),files:new Map(),recent:[],meta:{},ready:false,mode:'local',canWrite:true,route:null,metaReady:false};
 const SITE=()=>S.meta.name||'MPwiki';
 const FRONT=()=>S.meta.front||'대문';
 function rebuild(){S.byTitle=new Map();for(const p of S.pages.values())S.byTitle.set(p.title,p);S.catIdx=null}
@@ -351,7 +355,7 @@ function exists(t){if(S.byTitle.has(t))return true;if(t.startsWith('분류:'))re
 /* ---------- storage ---------- */
 let db=null,assets=null,downloads=null;
 const LS='seoljip-wiki-v1';
-let local={pages:{},revisions:[],files:{},meta:{}};
+let local={pages:{},revisions:[],files:{},meta:{},snapshots:{},snapparts:{}};
 function loadLocal(){const t=lsGet(LS);if(t){try{local=Object.assign(local,JSON.parse(t))}catch(e){}}}
 function saveLocal(){lsSet(LS,JSON.stringify(local))}
 function applyLocal(){
@@ -371,6 +375,27 @@ const store={
   },
   async putFile(id,data){if(db)return db.collection('files').doc(id).set(data);local.files[id]=data;saveLocal();applyLocal();dataChanged()},
   async delFile(id){if(db)return db.collection('files').doc(id).delete();delete local.files[id];saveLocal();applyLocal();dataChanged()},
+  async putSnapPart(id,data){if(db)return db.collection('snapparts').doc(id).set(data);local.snapparts=local.snapparts||{};local.snapparts[id]=data;saveLocal()},
+  async putSnap(id,data){if(db)return db.collection('snapshots').doc(id).set(data);local.snapshots=local.snapshots||{};local.snapshots[id]=data;saveLocal()},
+  async listSnaps(){
+    if(db){const s=await db.collection('snapshots').get();return s.docs.map(d=>Object.assign({id:d.id},d.data())).sort((a,b)=>b.at-a.at)}
+    return Object.entries(local.snapshots||{}).map(([id,v])=>Object.assign({id},v)).sort((a,b)=>b.at-a.at);
+  },
+  async snapPages(sn){
+    let parts;
+    if(db){const s=await db.collection('snapparts').where('sid','==',sn.id).get();parts=s.docs.map(d=>d.data())}
+    else parts=Object.values(local.snapparts||{}).filter(x=>x.sid===sn.id);
+    parts.sort((a,b)=>a.i-b.i);
+    if(parts.length<(sn.parts||1))throw {code:'snap_incomplete'};
+    return parts.flatMap(x=>x.pages||[]);
+  },
+  async delSnap(sn){
+    for(let i=0;i<(sn.parts||1);i++){const pid=sn.id+'-'+i;if(db)await db.collection('snapparts').doc(pid).delete();else if(local.snapparts)delete local.snapparts[pid]}
+    if(db)await db.collection('snapshots').doc(sn.id).delete();else{delete local.snapshots[sn.id];saveLocal()}
+  },
+  async putDraft(id,data){if(db)return db.collection('drafts').doc(id).set(data)},
+  async delDraft(id){if(db)return db.collection('drafts').doc(id).delete()},
+  async listDrafts(){if(db){const s=await db.collection('drafts').get();return s.docs.map(d=>Object.assign({id:d.id},d.data()))}return []},
   async putMeta(data){if(db)return db.doc('meta/site').set(data);local.meta=data;saveLocal();applyLocal();dataChanged()},
   async allRevs(){
     if(db){const s=await db.collection('revisions').get();return s.docs.map(d=>Object.assign({id:d.id},d.data()))}
@@ -763,10 +788,11 @@ function go(r,opt){
 }
 window.addEventListener('popstate',e=>{if(e.state&&e.state.r){S.route=e.state.r;render(true)}});
 function render(scrollTop){
+  if(S.leaveEditor){const f=S.leaveEditor;S.leaveEditor=null;try{f()}catch(e){console.error(e)}}
   if(S.authBlocked){main.innerHTML=`<div class="empty-state"><h2>${S.user?'이 계정으로는 볼 수 없습니다':'로그인이 필요합니다'}</h2><p>${S.user?`${escT(S.user.email||'')} 계정에는 이 위키를 볼 권한이 없습니다. 위키 주인 계정으로 다시 로그인하세요.`:'이 위키는 주인만 볼 수 있습니다. 구글 계정으로 로그인하세요.'}</p><div class="row"><button class="btn pri" data-act="auth">${S.user?'로그아웃':'구글로 로그인'}</button></div></div>`;return}
   if(!S.ready){main.innerHTML='<div class="loading">문서를 불러오는 중…</div>';return}
   const r=S.route||{v:'page',t:FRONT()};
-  const V={page:viewPage,edit:viewEdit,history:viewHistory,rev:viewRev,diff:viewDiff,backlinks:viewBacklinks,search:viewSearch,recent:viewRecent,all:viewAll,cats:viewCats,wanted:viewWanted,files:viewFiles,settings:viewSettings,move:viewMove,del:viewDelete,newpage:viewNew}[r.v]||viewPage;
+  const V={page:viewPage,edit:viewEdit,history:viewHistory,rev:viewRev,diff:viewDiff,backlinks:viewBacklinks,search:viewSearch,recent:viewRecent,all:viewAll,cats:viewCats,wanted:viewWanted,files:viewFiles,settings:viewSettings,move:viewMove,del:viewDelete,newpage:viewNew,restore:viewRestore,drafts:viewDrafts}[r.v]||viewPage;
   Promise.resolve(V(r)).then(()=>{
     if(scrollTop){if(r.anchor)setTimeout(()=>scrollAnchor(r.anchor),30);else window.scrollTo(0,0)}
   });
@@ -777,7 +803,8 @@ function dataChanged(){
   $('#logo-t').textContent=SITE();
   if(!S.ready)return;
   const v=S.route&&S.route.v;
-  if(v==='edit'||v==='settings'||v==='move'||v==='del'||v==='newpage')return;
+  saveDeviceCopy();
+  if(v==='edit'||v==='settings'||v==='move'||v==='del'||v==='newpage'||v==='restore')return;
   render(false);
 }
 function scrollAnchor(a){
@@ -805,10 +832,12 @@ function simpleHead(title){return `<div class="ah"><div class="ah-top"><h1 class
 function viewPage(r){
   const t=r.t||FRONT();const p=S.byTitle.get(t);
   let html='';
+  const myDrafts=[...S.drafts.values()].filter(d=>d.t===t);
+  const draftNote=myDrafts.length&&S.canWrite?`<div class="notice warn">이 문서에 저장하지 않은 편집이 있습니다 (${escT(fmt(myDrafts[0].at))}). <span class="row" style="display:inline-flex;gap:6px;margin-left:4px"><button class="btn" style="padding:3px 10px;font-size:13px" data-act="draftopen" data-k="${escA(myDrafts[0].key)}">이어서 편집</button><button class="btn" style="padding:3px 10px;font-size:13px" data-act="draftdrop" data-k="${escA(myDrafts[0].key)}">버리기</button></span></div>`:'';
   if(p){
     const rt=redirectTarget(p.content);
     if(rt&&!r.noredirect&&rt!==t&&!r.from){go({v:'page',t:rt,from:t,anchor:r.anchor},{replace:true});return}
-    html+=head(t,'page',p);
+    html+=head(t,'page',p)+draftNote;
     if(r.from)html+=`<div class="notice"><a href="#" data-go="${escA(r.from)}" data-noredirect="1">${escT(r.from)}</a>에서 넘어왔습니다.</div>`;
     const d=renderDoc(t,p.content);
     const cats=d.ctx.cats;
@@ -818,8 +847,12 @@ function viewPage(r){
     if(rt)html+=`<div class="notice">이 문서는 <a href="#" data-go="${escA(rt)}">${escT(rt)}</a> 문서로 넘겨줍니다.</div>`;
     html+=`<div class="wiki">${rt?'':d.html}</div>`;
   }else{
-    html+=head(t,'page',null);
+    html+=head(t,'page',null)+draftNote;
     if(t.startsWith('파일:'))html+=fileHeader(t.slice(3));
+    if(S.pages.size===0&&S.canWrite&&(S.lastSnap&&S.lastSnap.count||deviceCopies().length)){
+      const ls=S.lastSnap&&S.lastSnap.count?S.lastSnap:null;const dc=deviceCopies()[0];
+      html+=`<div class="notice warn"><b>문서가 하나도 없습니다.</b> ${ls?`마지막 복원 지점(${escT(fmt(ls.at))}, 문서 ${ls.count}개)`:`이 기기에 저장된 사본(${escT(fmt(dc.at))}, 문서 ${dc.count}개)`}이 남아 있습니다. 위키가 초기화된 거라면 되돌릴 수 있습니다.<div class="row" style="margin-top:8px"><button class="btn pri" data-act="restore">되돌리기 화면 열기</button></div></div>`;
+    }
     if(t===FRONT()&&S.pages.size===0){
       html+=`<div class="empty-state"><h2>아직 문서가 하나도 없습니다</h2><p>위키의 첫 화면인 '${escT(t)}' 문서부터 만들어 보세요. 캐릭터나 작품 이름으로 검색한 뒤 '새 문서 만들기'를 눌러도 됩니다.</p><div class="row">${S.canWrite?`<button class="btn pri" data-act="edit" data-t="${escA(t)}">'${escT(t)}' 만들기</button><button class="btn" data-act="newpage">다른 문서 만들기</button>`:''}</div></div>`;
     }else if(!t.startsWith('분류:')||!catMembers(t.slice(3)).length){
@@ -868,8 +901,9 @@ function viewEdit(r){
   let src=p?p.content:'';let secInfo=null;
   if(r.sec!==undefined&&p){const rg=sectionRange(p.content,r.sec);if(rg){secInfo={start:rg.start,end:rg.end};src=rg.lines.slice(rg.start,rg.end).join('\n').replace(/\n+$/,'')}}
   const base=p?p.rev:0;
-  const dkey='wikidraft:'+t+(secInfo?'#'+r.sec:'');
-  const draft=lsGet(dkey);
+  const secKey=secInfo?r.sec:null;
+  const dkey=draftKey(t,secKey);
+  let draft=getDraft(dkey);if(draft&&draft.text===src){dropDraft(dkey);draft=null}
   let html=head(t,'edit',p);
   if(!S.canWrite){main.innerHTML=html+'<div class="notice warn">이 위키를 편집할 권한이 없습니다.</div>';return}
   const pTpls=t.startsWith('템플릿:')?[]:templates();
@@ -877,7 +911,7 @@ function viewEdit(r){
   else if(!p&&t.startsWith('템플릿:'))html+=`<div class="notice">새 템플릿을 만듭니다. 새 문서에 미리 채워 둘 문단·틀·분류를 적으세요. <code class="wc">@문서명@</code>은 새 문서 이름으로, <code class="wc">@오늘@</code>은 오늘 날짜로 바뀝니다.</div>`;
   else if(!p)html+=`<div class="notice">새 문서를 만듭니다. <b>/</b>를 입력하면 문법 메뉴가 열립니다. 자주 쓰는 형식은 특수 기능 → 템플릿 관리에서 템플릿으로 만들어 둘 수 있습니다.</div>`;
   if(secInfo)html+=`<div class="notice">문단 하나만 편집하고 있습니다.</div>`;
-  if(draft&&draft!==src)html+=`<div class="notice warn" id="draftbar">저장하지 않은 임시 내용이 있습니다. <a href="#" id="draftload">불러오기</a> · <a href="#" id="draftdrop">버리기</a></div>`;
+  if(draft)html+=`<div class="notice warn" id="draftbar">저장하지 않고 닫힌 편집 내용(${escT(fmt(draft.at))} 자동 저장)을 불러왔습니다.${draft.base!==undefined&&draft.base!==null&&draft.base!==base?` 그 뒤로 문서가 바뀌었습니다 (r${draft.base} → r${base}). 저장하면 지금 문서 내용이 이 내용으로 바뀝니다.`:''} <a href="#" id="draftorig">원래 문서 내용으로 바꾸기</a></div>`;
   const tpls=[...S.byTitle.keys()].filter(x=>x.startsWith('틀:')).sort((a,b)=>a.localeCompare(b,'ko'));
   html+=`<div class="tabs"><button class="on" data-tab="ed">편집</button><button data-tab="pv">미리보기</button>${p?'<button data-tab="df">바뀐 내용</button>':''}</div>
   <div class="edbox">
@@ -898,11 +932,42 @@ function viewEdit(r){
   </div>
   <div class="field" style="margin-top:12px"><label for="sum">편집 요약</label><input class="in" id="sum" maxlength="190" placeholder="무엇을 바꿨는지 짧게 (선택)"></div>
   <div id="conflict"></div>
-  <div class="row"><button class="btn pri" id="save">저장</button><button class="btn" data-act="${p?'view':'front'}" data-t="${escA(t)}">취소</button><span class="muted" style="font-size:13px">/ 를 입력하면 문법 메뉴가 열립니다 · Ctrl+S로 저장</span></div>
+  <div class="row"><button class="btn pri" id="save">저장</button><button class="btn" id="cancel">취소</button><span class="muted" style="font-size:13px" id="autosave">편집 내용은 자동으로 임시 저장됩니다</span></div>
+  <div class="muted" style="font-size:12.5px;margin-top:6px">/ 를 입력하면 문법 메뉴가 열립니다 · Ctrl+S로 저장</div>
   <details class="help"><summary>문법 도움말</summary><div class="help-g">${HELP.map(h=>`<div><span>${escT(h[0])}</span><code>${escT(h[1])}</code></div>`).join('')}</div></details>`;
   main.innerHTML=html;
-  const ed=$('#ed');ed.value=src;
-  if(!p&&r.tpl&&!src)ed.value=applyTemplate(r.tpl,t);
+  const ed=$('#ed');ed.value=draft?draft.text:src;
+  if(draft&&draft.sum)$('#sum').value=draft.sum;
+  if(!draft&&!p&&r.tpl&&!src)ed.value=applyTemplate(r.tpl,t);
+  /* autosave: every pause in typing goes to this device at once and to the wiki's storage a few seconds later */
+  const asEl=$('#autosave');let lt=0,stT=0,closed=false;
+  const initial=ed.value,initialSum=$('#sum').value;
+  const dirty=()=>ed.value!==src&&!(ed.value===initial&&!draft);
+  const curDraft=()=>({key:dkey,t,sec:secKey,text:ed.value,sum:$('#sum').value,base,at:Date.now()});
+  const flush=toServer=>{
+    clearTimeout(lt);if(closed)return;
+    if(ed.value===src&&!$('#sum').value){if(S.drafts.has(dkey))dropDraft(dkey);asEl.textContent='편집 내용은 자동으로 임시 저장됩니다';return}
+    if(ed.value===initial&&$('#sum').value===initialSum&&(!draft||S.drafts.has(dkey)))return;
+    const d=curDraft();putDraftLocal(d);asEl.textContent='자동 저장됨 '+fmt(d.at).slice(11);
+    clearTimeout(stT);if(toServer)pushDraft(d);else stT=setTimeout(()=>pushDraft(curDraft()),3000);
+  };
+  const onInput=()=>{clearTimeout(lt);lt=setTimeout(()=>flush(false),500)};
+  const onHide=()=>{if(document.visibilityState==='hidden')flush(true)};
+  const onPageHide=()=>flush(true);
+  const onBefore=e=>{if(dirty()){flush(true);e.preventDefault();e.returnValue=''}};
+  document.addEventListener('visibilitychange',onHide);window.addEventListener('pagehide',onPageHide);window.addEventListener('beforeunload',onBefore);
+  const detach=()=>{document.removeEventListener('visibilitychange',onHide);window.removeEventListener('pagehide',onPageHide);window.removeEventListener('beforeunload',onBefore);clearTimeout(lt);clearTimeout(stT)};
+  S.leaveEditor=()=>{flush(true);closed=true;detach()};
+  const finish=()=>{closed=true;detach();S.leaveEditor=null;dropDraft(dkey)};
+  ed.addEventListener('input',onInput);$('#sum').addEventListener('input',onInput);
+  const dob=$('#draftorig');if(dob){let held=draft;dob.onclick=e=>{e.preventDefault();
+    if(held){ed.value=src;$('#sum').value='';dropDraft(dkey);dob.textContent='자동 저장된 내용 다시 불러오기';dob.dataset.back='1';const h=held;held=null;dob._h=h}
+    else if(dob._h){ed.value=dob._h.text;$('#sum').value=dob._h.sum||'';held=dob._h;const d=curDraft();putDraftLocal(d);pushDraft(d);dob.textContent='원래 문서 내용으로 바꾸기'}
+  }}
+  const cb=$('#cancel');cb.onclick=()=>{
+    if(dirty()&&cb.dataset.sure!=='1'){cb.dataset.sure='1';cb.textContent='편집한 내용 버리기';cb.classList.add('dan');setTimeout(()=>{if(cb.isConnected){cb.dataset.sure='';cb.textContent='취소';cb.classList.remove('dan')}},4000);return}
+    finish();go(p?{v:'page',t,noredirect:true}:{v:'page',t:FRONT()});
+  };
   const tb=$('#tplbar');if(tb){let lastTpl=r.tpl||'';tb.addEventListener('click',e=>{const b=e.target.closest('[data-usetpl]');if(!b)return;const name=b.dataset.usetpl;const cur=ed.value.trim();const fromTpl=lastTpl?applyTemplate(lastTpl,t).trim():'';
     if(cur&&cur!==fromTpl&&b.dataset.sure!=='1'){tb.querySelectorAll('[data-usetpl]').forEach(x=>{x.dataset.sure='';x.style.fontWeight=''});b.dataset.sure='1';b.style.fontWeight='700';toast('쓴 내용이 사라집니다. 한 번 더 누르면 바뀝니다.');return}
     ed.value=name?applyTemplate(name,t):'';lastTpl=name;tb.querySelectorAll('[data-usetpl]').forEach(x=>{x.dataset.sure='';x.style.fontWeight=''});ed.dispatchEvent(new Event('input'));ed.focus()})}
@@ -910,8 +975,6 @@ function viewEdit(r){
   ed.addEventListener('paste',e=>{const fl=e.clipboardData&&[...e.clipboardData.files].filter(f=>/^image\//.test(f.type));if(fl&&fl.length){e.preventDefault();editorUpload(ed,fl)}});
   ed.addEventListener('dragover',e=>{if(e.dataTransfer&&[...e.dataTransfer.items||[]].some(i=>i.kind==='file'))e.preventDefault()});
   ed.addEventListener('drop',e=>{const fl=e.dataTransfer&&e.dataTransfer.files;if(fl&&fl.length){e.preventDefault();editorUpload(ed,fl)}});
-  let dt;ed.addEventListener('input',()=>{clearTimeout(dt);dt=setTimeout(()=>lsSet(dkey,ed.value),600)});
-  const dl=$('#draftload');if(dl){dl.onclick=e=>{e.preventDefault();ed.value=draft;$('#draftbar').remove()};$('#draftdrop').onclick=e=>{e.preventDefault();lsDel(dkey);$('#draftbar').remove()}}
   main.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
     main.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
     const tab=b.dataset.tab;$('#ed').hidden=tab!=='ed';$('#tools').hidden=tab!=='ed';$('#pv').hidden=tab!=='pv';if($('#df'))$('#df').hidden=tab!=='df';
@@ -936,7 +999,7 @@ function viewEdit(r){
       let content=ed.value;
       if(secInfo&&cur)content=mergeSection(cur.content,secInfo,content);
       await savePage(t,content,$('#sum').value.trim(),cur?'edit':'create');
-      lsDel(dkey);toast('저장했습니다');go({v:'page',t,anchor:undefined},{replace:true});
+      finish();toast('저장했습니다');go({v:'page',t,anchor:undefined},{replace:true});
     }catch(err){console.error(err);toast(errMsg(err));btn.disabled=false}
   };
   $('#save').onclick=()=>doSave(false);
@@ -1071,10 +1134,10 @@ function insertTpl(ed,name){
   const s=ed.selectionStart;const lineStart=ed.value.lastIndexOf('\n',s-1)+1;
   ed.setSelectionRange(lineStart,lineStart);insertAt(ed,txt);
 }
-async function savePage(t,content,summary,action){
+async function savePage(t,content,summary,action,opt){
   const cur=S.byTitle.get(t);const now=Date.now();
   const d=renderDoc(t,content);
-  const id=cur?cur.id:uid();const rev=(cur?cur.rev:0)+1;
+  const id=cur?cur.id:(opt&&opt.id)||uid();const rev=(cur?cur.rev:(opt&&opt.rev)||0)+1;
   const links=[...d.ctx.links,...[...d.ctx.incs]].filter((x,i,a)=>a.indexOf(x)===i).slice(0,400);
   const rt=redirectTarget(content);if(rt&&!links.includes(rt))links.push(rt);
   const isTpl=t.startsWith('템플릿:');
@@ -1258,13 +1321,14 @@ function viewMove(r){
   };
 }
 const stripId=p=>{const o=Object.assign({},p);delete o.id;return o};
+async function deletePage(p,summary){const now=Date.now();await store.addRev({pageId:p.id,title:p.title,rev:p.rev+1,content:'',summary:summary||'',at:now,size:0,delta:-p.content.length,action:'delete'});await store.delPage(p.id)}
 function viewDelete(r){
   const t=r.t;const p=S.byTitle.get(t);if(!p){go({v:'page',t},{replace:true});return}
   const bl=backlinksOf(t).length;
   main.innerHTML=head(t,'del',p)+`<div class="notice warn">'${escT(t)}' 문서를 지웁니다. 편집 기록(역사)은 남지만 문서 목록과 검색에서는 사라집니다.${bl?` 이 문서를 링크한 문서 ${bl}개의 링크는 빨간 링크가 됩니다.`:''}</div><div class="field"><label for="dr">삭제 이유</label><input class="in" id="dr" placeholder="선택"></div><div class="row"><button class="btn dan" id="dgo">삭제</button><button class="btn" data-act="view" data-t="${escA(t)}">취소</button></div>`;
   $('#dgo').onclick=async()=>{
     $('#dgo').disabled=true;
-    try{const now=Date.now();await store.addRev({pageId:p.id,title:t,rev:p.rev+1,content:'',summary:$('#dr').value.trim(),at:now,size:0,delta:-p.content.length,action:'delete'});await store.delPage(p.id);toast('문서를 지웠습니다');go({v:'page',t:FRONT()},{replace:true})}
+    try{await deletePage(p,$('#dr').value.trim());toast('문서를 지웠습니다');go({v:'page',t:FRONT()},{replace:true})}
     catch(e){toast(errMsg(e));$('#dgo').disabled=false}
   };
 }
@@ -1309,6 +1373,9 @@ function viewSettings(){
   `<div class="field"><label for="sn">위키 이름</label><input class="in" id="sn" value="${escA(SITE())}" maxlength="40"></div>
    <div class="field"><label for="sf">대문 문서</label><input class="in" id="sf" value="${escA(FRONT())}" maxlength="80"><small>로고를 누르면 열리는 문서입니다.</small></div>
    <div class="row" style="margin-bottom:26px"><button class="btn pri" id="ssave" ${S.canWrite?'':'disabled'}>설정 저장</button></div>
+   <div class="grp-h">되돌리기</div>
+   <p class="muted" style="margin-top:0">하루에 한 번, 문서가 바뀌었으면 위키 전체를 복원 지점으로 자동 저장합니다. 위키가 초기화되거나 문서가 잘못 바뀌었을 때 원하는 시점으로 되돌릴 수 있습니다.</p>
+   <div class="row" style="margin-bottom:26px"><button class="btn" data-act="restore">되돌리기 · 복원 지점 열기</button></div>
    <div class="grp-h">전체 백업</div>
    <p class="muted" style="margin-top:0">문서 ${S.pages.size}개, 파일 ${S.files.size}개. 모든 문서와 편집 기록, 이미지를 파일 하나에 담습니다. 이 파일을 다른 MPwiki(예: Firebase 버전)의 '가져오기'에 넣으면 그대로 옮겨집니다.</p>
    <div class="row" style="margin-bottom:12px"><button class="btn pri" id="bexp">전체 백업 내려받기</button><span id="bxmsg" class="muted"></span></div>
@@ -1327,6 +1394,7 @@ function viewSettings(){
     const f=$('#bimp').files[0];const msg=$('#bmsg');if(!f){msg.textContent='백업 파일을 고르세요.';return}
     let data;try{data=JSON.parse(await f.text())}catch(e){msg.textContent='JSON 형식이 아닙니다.';return}
     $('#bgo').disabled=true;
+    if(S.pages.size){msg.textContent='가져오기 전에 지금 상태를 복원 지점으로 저장하는 중…';try{await makeSnapshot('before-import')}catch(e){console.error(e)}}
     if(data&&data.format==='mpwiki-backup'){
       try{const r=await restoreBackup(data,t=>msg.textContent=t);msg.textContent=`문서 ${r.pages}개, 편집 기록 ${r.revs}개, 이미지 ${r.files}개를 가져왔습니다.${r.skipped?` 이미지 ${r.skipped}개는 옮기지 못했습니다.`:''}`;S._revs=null}
       catch(e){console.error(e);msg.textContent='중간에 멈췄습니다: '+errMsg(e)}
@@ -1342,11 +1410,183 @@ function viewSettings(){
   };
 }
 
+/* ---------- drafts (autosave) ---------- */
+const DPRE='wikidraft:';
+function draftKey(t,sec){return DPRE+t+(sec!==null&&sec!==undefined?'#'+sec:'')}
+function fnv(str){let h=0x811c9dc5;for(let i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,16777619)>>>0}return h.toString(16).padStart(8,'0')}
+const draftId=k=>'d'+fnv(k)+fnv('mp'+k);
+function parseDraftKey(k){const rest=k.slice(DPRE.length);const m=rest.match(/^(.*)#(\d+)$/);return m?{t:m[1],sec:+m[2]}:{t:rest,sec:null}}
+function readLocalDraft(k){const v=lsGet(k);if(!v)return null;try{const d=JSON.parse(v);if(d&&typeof d.text==='string')return Object.assign(parseDraftKey(k),d,{key:k})}catch(e){}return Object.assign(parseDraftKey(k),{key:k,text:v,at:0,base:null})}
+function localDrafts(){const out=[];try{for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(k&&k.startsWith(DPRE)){const d=readLocalDraft(k);if(d)out.push(d)}}}catch(e){}return out}
+function getDraft(k){const a=readLocalDraft(k),b=S.drafts.get(k);if(a&&b)return (b.at||0)>(a.at||0)?b:a;return a||b||null}
+function putDraftLocal(d){lsSet(d.key,JSON.stringify(d));S.drafts.set(d.key,d);renderSide()}
+let draftChain=Promise.resolve();
+function pushDraft(d){if(!db||!S.canWrite)return;draftChain=draftChain.then(()=>store.putDraft(draftId(d.key),d)).catch(e=>console.error(e))}
+function dropDraft(k){lsDel(k);S.drafts.delete(k);if(db&&S.canWrite)draftChain=draftChain.then(()=>store.delDraft(draftId(k))).catch(e=>console.error(e));renderSide()}
+async function loadDrafts(){
+  const m=new Map();for(const d of localDrafts())m.set(d.key,d);
+  if(db&&S.canWrite){try{for(const d of await store.listDrafts()){if(!d.key||typeof d.text!=='string')continue;const c=m.get(d.key);if(!c||(d.at||0)>(c.at||0)){m.set(d.key,d);lsSet(d.key,JSON.stringify(Object.assign({},d,{id:undefined})))}}}catch(e){console.error(e)}}
+  for(const [k,d] of m){const p=S.byTitle.get(d.t);if((d.sec===null||d.sec===undefined)&&p&&p.content===d.text){m.delete(k);lsDel(k);if(db&&S.canWrite)store.delDraft(draftId(k)).catch(()=>{})}}
+  S.drafts=m;renderSide();
+  const v=S.route&&S.route.v;if(S.ready&&(v==='page'||v==='drafts'))render(false);
+}
+function viewDrafts(){
+  const list=[...S.drafts.values()].sort((a,b)=>(b.at||0)-(a.at||0));
+  main.innerHTML=simpleHead('저장 안 된 편집')+`<p class="muted" style="margin-top:0">편집하다가 저장하지 않고 닫힌 내용입니다. 창이 갑자기 꺼지거나 다른 화면으로 넘어가도 편집 내용은 자동으로 임시 저장되고, 여기서 이어서 편집할 수 있습니다. 저장하면 목록에서 사라집니다.</p>`+
+  (list.length?`<ul class="lst">${list.map(d=>{const p=S.byTitle.get(d.t);const changed=p&&d.base!==null&&d.base!==undefined&&d.base!==p.rev;return `<li><a class="t" href="#" data-act="draftopen" data-k="${escA(d.key)}">${escT(d.t)}</a>${d.sec!==null&&d.sec!==undefined?`<span class="tag">문단 편집</span>`:''}${!p?'<span class="tag">새 문서</span>':''}${changed?'<span class="tag">그 뒤 문서가 바뀜</span>':''}<span class="m">${d.at?fmt(d.at):'시각 모름'}</span><span class="row" style="margin-left:auto;gap:8px"><button class="btn" style="padding:3px 10px;font-size:13px" data-act="draftopen" data-k="${escA(d.key)}">이어서 편집</button><button class="btn" style="padding:3px 10px;font-size:13px" data-act="draftdrop" data-k="${escA(d.key)}">버리기</button></span><span class="snip">${escT(d.text.replace(/\s+/g,' ').slice(0,120))}${d.text.length>120?'…':''}</span></li>`}).join('')}</ul>`:`<div class="empty-state"><p>저장하지 않은 편집이 없습니다.</p></div>`);
+}
+
+/* ---------- restore points (snapshots) ---------- */
+const SNAP_KIND={auto:'자동','manual':'직접 만듦','before-restore':'되돌리기 직전','before-import':'가져오기 직전',device:'이 기기 사본'};
+function wikiHash(){return fnv([...S.pages.values()].map(p=>p.title+'\u0000'+p.content).sort().join('\u0001'))+':'+S.pages.size}
+const bytes=x=>{try{return new TextEncoder().encode(x).length}catch(e){return x.length*3}};
+async function makeSnapshot(kind,label){
+  const pages=[...S.pages.values()].map(p=>({id:p.id,title:p.title,content:p.content,createdAt:p.createdAt||null}));
+  const sid='s'+Date.now().toString(36)+uid().slice(0,5);
+  const chunks=[];let cur=[],size=0;const LIM=150000;
+  for(const pg of pages){const b=bytes(JSON.stringify(pg));if(cur.length&&size+b>LIM){chunks.push(cur);cur=[];size=0}cur.push(pg);size+=b}
+  chunks.push(cur);
+  for(let i=0;i<chunks.length;i++)await store.putSnapPart(sid+'-'+i,{sid,i,pages:chunks[i]});
+  const doc={at:Date.now(),kind,label:label||'',count:pages.length,parts:chunks.length,hash:wikiHash(),meta:{name:S.meta.name||'',front:S.meta.front||''}};
+  await store.putSnap(sid,doc);
+  S.lastSnap=Object.assign({id:sid},doc);
+  pruneSnaps().catch(e=>console.error(e));
+  return S.lastSnap;
+}
+async function pruneSnaps(){
+  const all=await store.listSnaps();const keep=S.mode==='local'?4:20;
+  const old=all.filter(x=>x.kind!=='manual').slice(keep);
+  for(const x of old){try{await store.delSnap(x)}catch(e){console.error(e)}}
+}
+async function maybeAutoSnapshot(){
+  if(S._autoSnapTried||!S.canWrite)return;S._autoSnapTried=true;
+  let all=[];try{all=await store.listSnaps()}catch(e){console.error(e);return}
+  S.lastSnap=all[0]||null;
+  if(!S.pages.size){if(S.route&&S.route.v==='page')render(false);return}
+  const last=all[0];
+  if(last&&(Date.now()-last.at<20*3600*1000||last.hash===wikiHash()))return;
+  try{await makeSnapshot('auto')}catch(e){console.error(e)}
+}
+function afterReady(){
+  setTimeout(()=>{loadDrafts();maybeAutoSnapshot()},1500);
+}
+/* a copy of every document kept in this browser, in case the stored wiki is ever wiped */
+let devT=0;
+function saveDeviceCopy(){
+  if(S.mode==='local'||!S.ready||!S.pages.size)return;
+  clearTimeout(devT);devT=setTimeout(()=>{
+    const pages=[...S.pages.values()].map(p=>({id:p.id,title:p.title,content:p.content}));
+    let prev=null;try{prev=JSON.parse(lsGet('mpw-devcopy')||'null')}catch(e){}
+    if(prev&&prev.pages&&prev.pages.length>=3&&pages.length<prev.pages.length/2)lsSet('mpw-devcopy-prev',JSON.stringify(prev));
+    lsSet('mpw-devcopy',JSON.stringify({at:Date.now(),wiki:SITE(),pages}));
+  },4000);
+}
+function deviceCopies(){
+  const out=[];
+  for(const [k,id] of [['mpw-devcopy','device'],['mpw-devcopy-prev','device-prev']]){try{const d=JSON.parse(lsGet(k)||'null');if(d&&Array.isArray(d.pages)&&d.pages.length)out.push({id,kind:'device',at:d.at,count:d.pages.length,label:id==='device-prev'?'문서가 많이 줄기 전 사본':'',pages:d.pages})}catch(e){}}
+  return out;
+}
+function deletedPages(revs){
+  const by=new Map();for(const r of revs){if(!by.has(r.pageId))by.set(r.pageId,[]);by.get(r.pageId).push(r)}
+  const out=[];
+  for(const [pid,l] of by){
+    l.sort((a,b)=>b.rev-a.rev||b.at-a.at);const last=l[0];
+    if(last.action!=='delete'||S.pages.has(pid)||S.byTitle.has(last.title))continue;
+    const before=l.find(x=>x.action!=='delete'&&typeof x.content==='string');if(!before)continue;
+    out.push({pageId:pid,title:last.title,at:last.at,rev:last.rev,content:before.content,summary:last.summary||''});
+  }
+  return out.sort((a,b)=>b.at-a.at);
+}
+async function viewRestore(r){
+  main.innerHTML=simpleHead('되돌리기 · 복원 지점')+'<div class="loading">복원 지점을 불러오는 중…</div>';
+  let snaps=[],revs=[];
+  try{snaps=await store.listSnaps()}catch(e){console.error(e)}
+  try{revs=await store.allRevs()}catch(e){console.error(e)}
+  if(S.route!==r)return;
+  const dev=deviceCopies();const del=deletedPages(revs);
+  S.lastSnap=snaps[0]||null;
+  S._rs={snaps,dev,del,cache:{}};
+  const item=x=>`<li id="rs-${escA(x.id)}"><span class="t">${escT(fmt(x.at))}</span><span class="tag">${SNAP_KIND[x.kind]||x.kind}</span><span class="m">문서 ${x.count}개</span>${x.label?`<span>${escT(x.label)}</span>`:''}<span class="row" style="margin-left:auto;gap:8px">${S.canWrite?`<button class="btn" style="padding:3px 10px;font-size:13px" data-act="snapopen" data-id="${escA(x.id)}">이 시점으로 되돌리기…</button>`:''}<button class="btn" style="padding:3px 10px;font-size:13px" data-act="snaplist" data-id="${escA(x.id)}">문서 보기</button>${S.canWrite&&x.kind!=='device'?`<button class="btn" style="padding:3px 10px;font-size:13px" data-act="snapdel" data-id="${escA(x.id)}">삭제</button>`:''}</span><div class="rs-body" style="flex-basis:100%" hidden></div></li>`;
+  main.innerHTML=simpleHead('되돌리기 · 복원 지점')+
+  `<p class="muted" style="margin-top:0">복원 지점은 그 시각의 위키 전체 문서를 저장해 둔 것입니다. 하루에 한 번, 문서가 바뀌었으면 자동으로 만들어지고, 백업을 가져오거나 되돌리기를 하기 직전에도 만들어집니다. 되돌리기를 하면 바뀐 문서마다 새 판이 저장되므로 각 문서의 역사도 그대로 남습니다.</p>
+  ${S.canWrite?`<div class="row" style="margin:6px 0 18px"><input class="in" id="snaplabel" placeholder="메모 (선택) 예: 2부 설정 갈아엎기 전" maxlength="60" style="flex:1 1 220px;width:auto"><button class="btn pri" data-act="snapmake">지금 복원 지점 만들기</button></div>`:''}
+  <div class="grp-h">복원 지점</div>
+  ${snaps.length?`<ul class="lst">${snaps.map(item).join('')}</ul>`:'<p class="muted">아직 복원 지점이 없습니다. 위키를 열어 두면 오늘 안에 첫 자동 복원 지점이 만들어집니다.</p>'}
+  ${dev.length?`<div class="grp-h">이 기기에 저장된 사본</div><p class="muted" style="margin-top:0">이 브라우저가 마지막으로 본 문서들의 사본입니다. 저장된 위키가 통째로 사라졌을 때 쓸 수 있습니다.</p><ul class="lst">${dev.map(item).join('')}</ul>`:''}
+  <div class="grp-h">삭제된 문서</div>
+  ${del.length?`<ul class="lst">${del.map((x,i)=>`<li><span class="t">${escT(x.title)}</span><span class="m">${escT(fmt(x.at))} 삭제</span>${x.summary?`<span>${escT(x.summary)}</span>`:''}${S.canWrite?`<span style="margin-left:auto"><button class="btn" style="padding:3px 10px;font-size:13px" data-act="revive" data-i="${i}">되살리기</button></span>`:''}</li>`).join('')}</ul>`:'<p class="muted">삭제된 문서가 없습니다.</p>'}`;
+}
+function rsFind(id){const R=S._rs;if(!R)return null;return R.snaps.find(x=>x.id===id)||R.dev.find(x=>x.id===id)||null}
+async function rsPages(x){const R=S._rs;if(R.cache[x.id])return R.cache[x.id];const pg=x.pages?x.pages:await store.snapPages(x);R.cache[x.id]=pg;return pg}
+async function snapOpen(id,mode){
+  const x=rsFind(id);if(!x)return;const li=document.getElementById('rs-'+id);if(!li)return;const box=li.querySelector('.rs-body');
+  if(!box.hidden&&box.dataset.mode===mode){box.hidden=true;return}
+  box.hidden=false;box.dataset.mode=mode;box.innerHTML='<div class="muted" style="padding:6px 0">불러오는 중…</div>';
+  let pages;try{pages=await rsPages(x)}catch(e){console.error(e);box.innerHTML='<div class="notice warn">이 복원 지점을 읽지 못했습니다.</div>';return}
+  if(mode==='list'){
+    box.innerHTML=`<div style="padding:8px 0">${pages.slice().sort((a,b)=>a.title.localeCompare(b.title,'ko')).map(pg=>`<details class="wfold" style="margin:4px 0"><summary>${escT(pg.title)}${S.byTitle.get(pg.title)?(S.byTitle.get(pg.title).content===pg.content?' <span class="muted" style="font-weight:400">· 지금과 같음</span>':' <span class="muted" style="font-weight:400">· 지금과 다름</span>'):' <span class="muted" style="font-weight:400">· 지금은 없음</span>'}</summary><div class="wfold-b"><pre class="wcode" style="font-family:var(--f-mono);font-size:13px;background:var(--code);padding:10px;border-radius:4px;white-space:pre-wrap;margin:0">${escT(pg.content)}</pre></div></details>`).join('')}</div>`;
+    return;
+  }
+  const snapT=new Map(pages.map(pg=>[normTitle(pg.title),pg]));
+  const changed=[],missing=[],same=[];for(const [t,pg] of snapT){const c=S.byTitle.get(t);if(!c)missing.push(t);else if(c.content!==pg.content)changed.push(t);else same.push(t)}
+  const extra=[...S.byTitle.keys()].filter(t=>!snapT.has(t));
+  const nm=l=>l.slice(0,15).map(escT).join(', ')+(l.length>15?` 외 ${l.length-15}개`:'');
+  if(!changed.length&&!missing.length&&!extra.length){box.innerHTML='<div class="notice" style="margin:8px 0">지금 문서와 똑같습니다. 되돌릴 것이 없습니다.</div>';return}
+  box.innerHTML=`<div class="notice" style="margin:8px 0">
+    <div><b>${escT(fmt(x.at))}</b> 시점으로 되돌리면</div>
+    <ul style="margin:6px 0">${changed.length?`<li>내용이 바뀌는 문서 ${changed.length}개: ${nm(changed)}</li>`:''}${missing.length?`<li>다시 생기는 문서 ${missing.length}개: ${nm(missing)}</li>`:''}<li>그대로인 문서 ${same.length}개</li></ul>
+    ${extra.length?`<label class="row" style="font-size:14px;gap:6px;align-items:flex-start"><input type="checkbox" id="rx-${escA(id)}" style="margin-top:4px"> <span>이 시점 뒤에 새로 만든 문서 ${extra.length}개도 지우기 (${nm(extra)}). 지운 문서도 '삭제된 문서'에 남아 다시 되살릴 수 있습니다.</span></label>`:''}
+    <div class="row" style="margin-top:10px"><button class="btn pri" data-act="snaprun" data-id="${escA(id)}">되돌리기 실행</button><span class="muted" id="rm-${escA(id)}">실행하기 전에 지금 상태를 복원 지점으로 먼저 저장합니다.</span></div></div>`;
+}
+async function snapRun(b){
+  const id=b.dataset.id;const x=rsFind(id);if(!x)return;const msg=document.getElementById('rm-'+id);
+  const delExtra=!!(document.getElementById('rx-'+id)||{}).checked;
+  b.disabled=true;
+  try{
+    const pages=await rsPages(x);
+    if(S.pages.size){msg.textContent='지금 상태를 복원 지점으로 저장하는 중…';await makeSnapshot('before-restore',fmt(x.at)+' 시점으로 되돌리기 전')}
+    const revs=await store.allRevs().catch(()=>[]);const dead=new Map(deletedPages(revs).map(d=>[d.title,d]));
+    const when=fmt(x.at).slice(0,16);let n=0;const snapT=new Map();
+    for(const pg of pages)snapT.set(normTitle(pg.title),pg);
+    const work=[...snapT].filter(([t,pg])=>{const c=S.byTitle.get(t);return !c||c.content!==pg.content});
+    for(const [t,pg] of work){
+      const cur=S.byTitle.get(t);const dd=dead.get(t);
+      await savePage(t,pg.content,`${when} 복원 지점으로 되돌림`,cur?'revert':'create',!cur&&dd?{id:dd.pageId,rev:dd.rev}:(!cur&&pg.id&&!S.pages.has(pg.id)?{id:pg.id}:undefined));
+      n++;msg.textContent=`문서 ${n} / ${work.length} 되돌리는 중…`;
+    }
+    let d=0;
+    if(delExtra){for(const t of [...S.byTitle.keys()].filter(t=>!snapT.has(t))){const p=S.byTitle.get(t);if(p){await deletePage(p,`${when} 복원 지점으로 되돌리며 삭제`);d++}}}
+    if(x.meta&&(x.meta.name||x.meta.front)&&(x.meta.name!==S.meta.name||x.meta.front!==S.meta.front))await store.putMeta(Object.assign({},S.meta,x.meta.name?{name:x.meta.name}:{},x.meta.front?{front:x.meta.front}:{}));
+    S._revs=null;toast(`${when} 시점으로 되돌렸습니다 (문서 ${n}개${d?`, 삭제 ${d}개`:''})`);
+    go({v:'restore'},{replace:true});
+  }catch(e){console.error(e);msg.textContent='중간에 멈췄습니다: '+errMsg(e);b.disabled=false}
+}
+async function snapMake(b){
+  if(!S.pages.size){toast('저장할 문서가 없습니다');return}
+  b.disabled=true;
+  try{await makeSnapshot('manual',($('#snaplabel')||{}).value||'');toast('복원 지점을 만들었습니다');render(false)}
+  catch(e){console.error(e);toast(errMsg(e));b.disabled=false}
+}
+async function snapDel(b){
+  const x=rsFind(b.dataset.id);if(!x)return;
+  if(b.dataset.sure!=='1'){b.dataset.sure='1';b.textContent='정말 삭제';setTimeout(()=>{if(b.isConnected){b.dataset.sure='';b.textContent='삭제'}},3000);return}
+  b.disabled=true;try{await store.delSnap(x);toast('복원 지점을 지웠습니다');render(false)}catch(e){toast(errMsg(e));b.disabled=false}
+}
+async function revive(b){
+  const x=S._rs&&S._rs.del[+b.dataset.i];if(!x)return;
+  if(S.byTitle.has(x.title)){toast('같은 이름의 문서가 이미 있습니다. 그 문서를 옮기거나 지운 뒤 다시 시도하세요');return}
+  b.disabled=true;
+  try{await savePage(x.title,x.content,'삭제된 문서 되살림','revert',{id:x.pageId,rev:x.rev});S._revs=null;toast(`'${x.title}' 문서를 되살렸습니다`);go({v:'page',t:x.title})}
+  catch(e){toast(errMsg(e));b.disabled=false}
+}
+
 /* side */
 function renderSide(){
   const rc=$('#rc');
   const seen=new Set();const list=[];for(const v of S.recent){if(seen.has(v.title))continue;seen.add(v.title);list.push(v);if(list.length>=12)break}
   rc.innerHTML=list.length?list.map(v=>`<li><a href="#" data-go="${escA(v.title)}" class="${S.byTitle.has(v.title)?'':'red-l'}" title="${escA(v.title)}">${escT(v.title)}</a><time>${rel(v.at)}</time></li>`).join(''):'<li><span class="empty">'+(S.ready?'아직 바뀐 문서가 없습니다.':'불러오는 중…')+'</span></li>';
+  const sd=$('#side-drafts');const nd=S.canWrite?S.drafts.size:0;
+  if(nd){sd.hidden=false;sd.innerHTML=`저장 안 된 편집 <b>${nd}개</b> · <a href="#" data-act="drafts">보기</a>`}else sd.hidden=true;
   const note=$('#side-note');
   if(S.mode==='fb'){note.hidden=false;note.textContent=S.user?`${S.user.email} 로그인${S.canWrite?'':' · 읽기 전용'}`:'로그인하지 않음 · 읽기 전용'}
   else if(S.mode==='local'&&S.ready){note.hidden=false;note.textContent=S.setupMissing?'Firebase 설정이 비어 있어 이 브라우저에만 저장됩니다.':'이 화면에서는 이 브라우저에만 저장됩니다.'}else note.hidden=true;
@@ -1381,6 +1621,16 @@ document.addEventListener('click',async e=>{
     case 'settings':go({v:'settings'});break;
     case 'newpage':go({v:'newpage',tpl:b.dataset.tpl});break;
     case 'tpls':go({v:'all',ns:'템플릿'});break;
+    case 'restore':go({v:'restore'});break;
+    case 'drafts':go({v:'drafts'});break;
+    case 'draftopen':{const d=S.drafts.get(b.dataset.k)||getDraft(b.dataset.k);if(d)go(d.sec!==null&&d.sec!==undefined?{v:'edit',t:d.t,sec:d.sec}:{v:'edit',t:d.t});break}
+    case 'draftdrop':{if(b.dataset.sure!=='1'){b.dataset.sure='1';b.textContent='정말 버리기';setTimeout(()=>{if(b.isConnected){b.dataset.sure='';b.textContent='버리기'}},3000);break}dropDraft(b.dataset.k);toast('임시 저장을 버렸습니다');render(false);break}
+    case 'snapmake':snapMake(b);break;
+    case 'snapopen':snapOpen(b.dataset.id,'restore');break;
+    case 'snaplist':snapOpen(b.dataset.id,'list');break;
+    case 'snaprun':snapRun(b);break;
+    case 'snapdel':snapDel(b);break;
+    case 'revive':revive(b);break;
     case 'newtpl':go({v:'newpage',prefix:'템플릿:'});break;
     case 'auth':if(window.__auth)window.__auth();break;
     case 'random':{const ts=[...S.byTitle.keys()].filter(x=>nsOf(x)==='doc');if(ts.length)go({v:'page',t:ts[Math.floor(Math.random()*ts.length)]});else toast('아직 문서가 없습니다');break}
@@ -1442,7 +1692,7 @@ $('#sform').addEventListener('submit',e=>{
 });
 
 /* ---------- init ---------- */
-function readyCheck(){if(!S.ready&&S._p&&S._m){S.ready=true;renderSide();$('#logo-t').textContent=SITE();if(!S.route){S.route={v:'page',t:FRONT()};try{history.replaceState({r:S.route},'')}catch(e){}}render(true)}}
+function readyCheck(){if(!S.ready&&S._p&&S._m){S.ready=true;afterReady();renderSide();$('#logo-t').textContent=SITE();if(!S.route){S.route={v:'page',t:FRONT()};try{history.replaceState({r:S.route},'')}catch(e){}}render(true)}}
 async function init(){
   loadLocal();
   const cfg=window.MPWIKI_FIREBASE||{};
